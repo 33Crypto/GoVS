@@ -1,1 +1,1 @@
-mkdir [GoVS]
+mkdir [DIR]
