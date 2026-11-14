@@ -356,6 +356,7 @@ function summarize(cli: Cli): { markdown: string; findingCount: number; diagnost
   const diagnostics: Diagnostic[] = [];
   const tools: string[] = [];
   let linesOfCode: number | null = null;
+  let unreadableSarif = 0;
 
   if (!existsSync(cli.sarif)) {
     diagnostics.push({
@@ -374,8 +375,13 @@ function summarize(cli: Cli): { markdown: string; findingCount: number; diagnost
   for (const path of sarifPaths) {
     let parsed: SarifLog;
     try {
-      parsed = JSON.parse(readCapped(path, 20_000_000)) as SarifLog;
+      let text = readFileSync(path, "utf8");
+      if (text.charCodeAt(0) === 0xfeff) {
+        text = text.slice(1);
+      }
+      parsed = JSON.parse(text) as SarifLog;
     } catch (error) {
+      unreadableSarif += 1;
       diagnostics.push({
         severity: "error",
         source: basename(path),
@@ -524,7 +530,9 @@ function summarize(cli: Cli): { markdown: string; findingCount: number; diagnost
   lines.push("");
   lines.push("### Findings");
   lines.push("");
-  if (findings.length === 0) {
+  if (findings.length === 0 && unreadableSarif > 0) {
+    lines.push("No findings could be read. One or more SARIF files failed to parse; see extraction and build.");
+  } else if (findings.length === 0) {
     lines.push("CodeQL reported no findings.");
   } else {
     lines.push("| Severity | Rule | Location | Message |");
