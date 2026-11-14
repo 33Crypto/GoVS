@@ -55,6 +55,8 @@ interface SarifNotification {
   message?: SarifMessage;
   level?: string;
   descriptor?: { id?: string };
+  locations?: Array<{ physicalLocation?: SarifPhysical }>;
+  properties?: { attributes?: Record<string, unknown> };
 }
 
 interface SarifRun {
@@ -267,6 +269,14 @@ function interestingLogLine(line: string): boolean {
   if (line.length > 500) {
     return false;
   }
+  // CodeQL's own query-evaluation log names queries such as "Extraction error"
+  // while describing a successful run. Those lines are not build failures.
+  if (/Interpreted (diagnostic|problem|pathproblem|metric) query/i.test(line)) {
+    return false;
+  }
+  if (/\[DETAILS\]/i.test(line)) {
+    return false;
+  }
   return (
     /:\s*(error|warning)\s/i.test(line) ||
     /\b(error|warning)\s+(CS|MSB)\d+/i.test(line) ||
@@ -275,7 +285,7 @@ function interestingLogLine(line: string): boolean {
     /\d+\s+(Error|Warning)\(s\)/.test(line) ||
     /no source code (was )?seen/i.test(line) ||
     /failed to extract/i.test(line) ||
-    /\b(fatal error|extraction error|extraction warning)\b/i.test(line)
+    /\]\s*(ERROR|WARNING)\b/.test(line)
   );
 }
 
@@ -345,6 +355,7 @@ function summarize(cli: Cli): { markdown: string; findingCount: number; diagnost
   const findings: Finding[] = [];
   const diagnostics: Diagnostic[] = [];
   const tools: string[] = [];
+  let linesOfCode: number | null = null;
 
   if (!existsSync(cli.sarif)) {
     diagnostics.push({
@@ -389,21 +400,50 @@ function summarize(cli: Cli): { markdown: string; findingCount: number; diagnost
           ...(invocation.toolExecutionNotifications ?? []),
           ...(invocation.toolConfigurationNotifications ?? []),
         ];
+        const extractedFiles: string[] = [];
         for (const notification of notifications) {
+          const source = notification.descriptor?.id ?? basename(path);
+          const uri = notification.locations?.[0]?.physicalLocation?.artifactLocation?.uri;
+          const file = uri ? displayPath(uri) : "";
+          if (source === "cs/diagnostics/successfully-extracted-files" && file) {
+            extractedFiles.push(file);
+            continue;
+          }
+          const text = messageText(notification.message);
+          const attributes = notification.properties?.attributes;
+          const attributeText = attributes
+            ? Object.entries(attributes)
+                .map(([key, value]) => `${key}=${stringifyShort(value)}`)
+                .join(", ")
+            : "";
+          const message = [text, file, attributeText].filter((part) => part !== "").join(" ");
+          let severity = (notification.level ?? "warning").toLowerCase();
+          if ((severity === "none" || severity === "") && message !== "") {
+            severity = "note";
+          }
+          if (message === "") {
+            continue;
+          }
+          diagnostics.push({ severity, source, message });
+        }
+        if (extractedFiles.length > 0) {
+          extractedFiles.sort();
           diagnostics.push({
-            severity: (notification.level ?? "warning").toLowerCase(),
-            source: notification.descriptor?.id ?? basename(path),
-            message: messageText(notification.message) || "(no notification message)",
+            severity: "note",
+            source: "cs/diagnostics/successfully-extracted-files",
+            message: `Extracted ${extractedFiles.length} files: ${extractedFiles.join(", ")}`,
           });
         }
       }
-      if (run.properties) {
-        for (const [key, value] of Object.entries(run.properties)) {
-          if (/extract|build|diagnostic|status/i.test(key)) {
-            const text = stringifyShort(value);
-            if (text) {
-              diagnostics.push({ severity: "note", source: basename(path), message: `${key}: ${text}` });
-            }
+      const metrics = run.properties?.metricResults;
+      if (Array.isArray(metrics)) {
+        for (const metric of metrics) {
+          if (!metric || typeof metric !== "object") {
+            continue;
+          }
+          const record = metric as { ruleId?: string; value?: unknown };
+          if (record.ruleId === "cs/summary/lines-of-code" && typeof record.value === "number") {
+            linesOfCode = record.value;
           }
         }
       }
@@ -475,6 +515,9 @@ function summarize(cli: Cli): { markdown: string; findingCount: number; diagnost
     lines.push(`- Tool: ${[...new Set(tools)].join(", ")}`);
   }
   lines.push(`- Findings: ${findings.length}${countText ? ` (${countText})` : ""}`);
+  if (linesOfCode !== null) {
+    lines.push(`- C# lines extracted: ${linesOfCode}`);
+  }
   if (dbNotes.length > 0) {
     lines.push(`- Database: ${dbNotes.join("; ")}`);
   }
