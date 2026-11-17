@@ -1,0 +1,119 @@
+# CodeQL for this repository. The stock workflow lived at the repo root as
+# cosx-vscode-codeql-tanx-triage.pro*, so Actions never loaded it, and it pinned
+# retired actions (checkout@v2, codeql-action@v1).
+#
+# Repository.csproj is a non-SDK .NET Framework 4.0 project. `dotnet build`
+# fails with MSB4019 because the SDK does not ship Microsoft.CSHARP.Targets,
+# and packages.config pins WindowsAzure.Storage 1.7.0.0, which NuGet does not
+# publish (the package is 1.7.0). Autobuild cannot compile this library.
+# The manual step below compiles the existing sources with a throwaway
+# SDK-style net48 project so CodeQL can trace a real csc invocation.
+
+name: "cosx-vs-tanx-triage (CodeQL)"
+
+on:
+  push:
+    branches: ["master"]
+  pull_request:
+    branches: ["master"]
+  schedule:
+    - cron: "16 4 * * 1"
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: csharp
+            build-mode: manual
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Prepare traced C# build
+        if: matrix.build-mode == 'manual'
+        shell: bash
+        run: |
+          set -euo pipefail
+          results="${GITHUB_WORKSPACE}/codeql-results"
+          build_dir="${RUNNER_TEMP}/codeql-csharp-build"
+          mkdir -p "$results/sarif" "$build_dir"
+          cat > "$build_dir/CodeQLBuild.csproj" <<EOF
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <TargetFramework>net48</TargetFramework>
+              <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+              <ImplicitUsings>disable</ImplicitUsings>
+              <Nullable>disable</Nullable>
+              <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+            </PropertyGroup>
+            <ItemGroup>
+              <PackageReference Include="WindowsAzure.Storage" Version="1.7.0" />
+              <PackageReference Include="Microsoft.WindowsAzure.ConfigurationManager" Version="1.7.0.3" />
+              <Reference Include="Microsoft.CSharp" />
+              <Compile Include="${GITHUB_WORKSPACE}/**/*.cs" />
+            </ItemGroup>
+          </Project>
+          EOF
+          dotnet restore "$build_dir/CodeQLBuild.csproj" --nologo 2>&1 | tee "$results/restore.log"
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Build C# for CodeQL
+        if: matrix.build-mode == 'manual'
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_dir="${RUNNER_TEMP}/codeql-csharp-build"
+          dotnet build "$build_dir/CodeQLBuild.csproj" --no-restore --nologo -c Debug 2>&1 | tee "${GITHUB_WORKSPACE}/codeql-results/build.log"
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"
+          output: ${{ github.workspace }}/codeql-results/sarif
+
+      - name: Setup Node
+        if: always()
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Triage CodeQL results
+        if: always()
+        shell: bash
+        run: |
+          npx --yes tsx@4 scripts/tanx.ts \
+            --sarif "${GITHUB_WORKSPACE}/codeql-results" \
+            --summary "${GITHUB_WORKSPACE}/codeql-results/tanx-summary.md" \
+            --logs "${RUNNER_TEMP}/codeql_databases"
+
+      - name: Upload SARIF and triage summary
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cosx-vs-tanx-triage-${{ matrix.language }}
+          path: ${{ github.workspace }}/codeql-results
+          if-no-files-found: error
+          retention-days: 14
