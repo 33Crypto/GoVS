@@ -1,5 +1,14 @@
 LOCK33 Technologies' visual schematic engine.
 
+## Repository card
+
+| | |
+|---|---|
+| **Status** | Active. Holds the CodeQL triage pipeline (`scripts/tanx.ts`, `cosx-vs-tanx-triage` workflow) and the Azure Table Storage Repository-pattern sample. |
+| **Purpose** | Visual schematic engine and the cosx-vs-tanx security triage pipeline. |
+| **Visibility** | Private |
+| **Related** | `33Crypto/Go-VS-Copilot`, `33Crypto/Lockcode` |
+
 Windows Azure Cloud Storage using the Repository pattern
 
 Repository pattern instead of an ORM but with added Unit of Work and Specification patterns
