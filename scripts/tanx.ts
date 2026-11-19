@@ -11,7 +11,8 @@
  *     --logs "$RUNNER_TEMP/codeql_databases"
  *
  * Node 20+. Uses only node:fs and node:path. Findings do not fail the
- * process; a missing or unreadable SARIF is reported in the summary.
+ * process. A missing or unreadable SARIF is reported in the summary and
+ * exits with code 2, so a broken analysis is never mistaken for a clean one.
  */
 
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -150,7 +151,13 @@ function messageText(message: SarifMessage | undefined): string {
 }
 
 function cell(value: string): string {
-  return value.replace(/\|/g, "\\|").replace(/</g, "&lt;").trim();
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/[\\`*_[\]|]/g, (ch) => `\\${ch}`)
+    .replace(/\r?\n/g, " ")
+    .trim();
 }
 
 function severityRank(level: string): number {
@@ -346,7 +353,12 @@ function stringifyShort(value: unknown): string {
   }
 }
 
-function summarize(cli: Cli): { markdown: string; findingCount: number; diagnosticCount: number } {
+function summarize(cli: Cli): {
+  markdown: string;
+  findingCount: number;
+  diagnosticCount: number;
+  analysisOk: boolean;
+} {
   const sarifPaths = walk(cli.sarif, (name) => name.endsWith(".sarif") || name.endsWith(".sarif.json"));
   const logPaths = [
     ...walk(cli.sarif, (name) => name.endsWith(".log")),
@@ -411,7 +423,7 @@ function summarize(cli: Cli): { markdown: string; findingCount: number; diagnost
           const source = notification.descriptor?.id ?? basename(path);
           const uri = notification.locations?.[0]?.physicalLocation?.artifactLocation?.uri;
           const file = uri ? displayPath(uri) : "";
-          if (source === "cs/diagnostics/successfully-extracted-files" && file) {
+          if (/\/diagnostics\/successfully-extracted-files$/.test(source) && file) {
             extractedFiles.push(file);
             continue;
           }
@@ -436,7 +448,7 @@ function summarize(cli: Cli): { markdown: string; findingCount: number; diagnost
           extractedFiles.sort();
           diagnostics.push({
             severity: "note",
-            source: "cs/diagnostics/successfully-extracted-files",
+            source: "diagnostics/successfully-extracted-files",
             message: `Extracted ${extractedFiles.length} files: ${extractedFiles.join(", ")}`,
           });
         }
@@ -448,7 +460,7 @@ function summarize(cli: Cli): { markdown: string; findingCount: number; diagnost
             continue;
           }
           const record = metric as { ruleId?: string; value?: unknown };
-          if (record.ruleId === "cs/summary/lines-of-code" && typeof record.value === "number") {
+          if (typeof record.ruleId === "string" && /\/summary\/lines-of-code$/.test(record.ruleId) && typeof record.value === "number") {
             linesOfCode = record.value;
           }
         }
@@ -516,13 +528,15 @@ function summarize(cli: Cli): { markdown: string; findingCount: number; diagnost
   lines.push("");
   lines.push("### Analysis");
   lines.push("");
+  const analysisOk = sarifPaths.length > 0 && unreadableSarif === 0;
+  lines.push(`- Analysis status: ${analysisOk ? "completed" : "FAILED (results missing or unreadable)"}`);
   lines.push(`- SARIF files: ${sarifPaths.length}`);
   if (tools.length > 0) {
     lines.push(`- Tool: ${[...new Set(tools)].join(", ")}`);
   }
   lines.push(`- Findings: ${findings.length}${countText ? ` (${countText})` : ""}`);
   if (linesOfCode !== null) {
-    lines.push(`- C# lines extracted: ${linesOfCode}`);
+    lines.push(`- Lines of code extracted: ${linesOfCode}`);
   }
   if (dbNotes.length > 0) {
     lines.push(`- Database: ${dbNotes.join("; ")}`);
@@ -530,8 +544,8 @@ function summarize(cli: Cli): { markdown: string; findingCount: number; diagnost
   lines.push("");
   lines.push("### Findings");
   lines.push("");
-  if (findings.length === 0 && unreadableSarif > 0) {
-    lines.push("No findings could be read. One or more SARIF files failed to parse; see extraction and build.");
+  if (!analysisOk) {
+    lines.push("Analysis did not complete, so this is NOT a clean result. See extraction and build.");
   } else if (findings.length === 0) {
     lines.push("CodeQL reported no findings.");
   } else {
@@ -569,12 +583,13 @@ function summarize(cli: Cli): { markdown: string; findingCount: number; diagnost
     markdown: `${lines.join("\n")}\n`,
     findingCount: findings.length,
     diagnosticCount: diagnostics.length,
+    analysisOk,
   };
 }
 
 function main(): void {
   const cli = parseArgs(process.argv.slice(2));
-  const { markdown, findingCount, diagnosticCount } = summarize(cli);
+  const { markdown, findingCount, diagnosticCount, analysisOk } = summarize(cli);
   mkdirSync(dirname(resolve(cli.summary)), { recursive: true });
   writeFileSync(cli.summary, markdown);
   const stepSummary = process.env.GITHUB_STEP_SUMMARY;
@@ -583,6 +598,9 @@ function main(): void {
   }
   process.stdout.write(markdown);
   process.stdout.write(`tanx: ${findingCount} finding(s), ${diagnosticCount} diagnostic line(s)\n`);
+  if (!analysisOk) {
+    process.exitCode = 2;
+  }
 }
 
 main();

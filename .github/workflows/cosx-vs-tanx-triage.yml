@@ -99,12 +99,22 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: "22"
+          cache: npm
+          cache-dependency-path: scripts/package-lock.json
+
+      - name: Install triage dependencies (locked)
+        if: always()
+        run: npm ci --prefix scripts
+
+      - name: Test triage script
+        if: always()
+        run: npm test --prefix scripts
 
       - name: Triage CodeQL results
         if: always()
         shell: bash
         run: |
-          npx --yes tsx@4 scripts/tanx.ts \
+          scripts/node_modules/.bin/tsx scripts/tanx.ts \
             --sarif "${GITHUB_WORKSPACE}/codeql-results" \
             --summary "${GITHUB_WORKSPACE}/codeql-results/tanx-summary.md" \
             --logs "${RUNNER_TEMP}/codeql_databases"
